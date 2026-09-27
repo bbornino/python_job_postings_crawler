@@ -1,0 +1,60 @@
+{
+  "name": "submit_company_vetting",
+  "description": "Submit the completed company vetting record. Call this once, with every field populated — do not respond with prose. This is a genericized reference schema matching company_vetting_prompt.md; a real configuration names its own scoring points.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "company": { "type": "string" },
+      "checked_on": { "type": "string", "description": "YYYY-MM-DD" },
+
+      "synopsis": { "type": "string" },
+      "links": {
+        "type": "object",
+        "properties": {
+          "company_url": { "type": "string" },
+          "review_site_url": { "type": "string" }
+        },
+        "required": ["company_url", "review_site_url"]
+      },
+
+      "scoring": {
+        "type": "object",
+        "description": "Each point: value (0.0-1.0, one of the tiers listed in the prompt doc — never interpolated) and a one-clause reason citing the actual evidence found. Weight is NOT included here — the calling script holds the fixed weights table and computes fit_score itself.",
+        "properties": {
+          "location_fit":                   { "$ref": "#/$defs/scored_point" },
+          "career_path_flexibility":        { "$ref": "#/$defs/scored_point" },
+          "culture_inclusion_signal":       { "$ref": "#/$defs/scored_point" },
+          "jurisdiction_regulatory_risk":   { "$ref": "#/$defs/scored_point" },
+          "engineering_culture_alignment":  { "$ref": "#/$defs/scored_point" },
+          "compliance_credential_requirement": { "$ref": "#/$defs/scored_point" },
+          "hiring_health":                  { "$ref": "#/$defs/scored_point" },
+          "inclusive_hiring_practice":      { "$ref": "#/$defs/scored_point" },
+          "interview_methodology":          { "$ref": "#/$defs/scored_point" },
+          "skill_stack_transferability":    { "$ref": "#/$defs/scored_point" },
+          "historical_outcome":             { "$ref": "#/$defs/scored_point" },
+          "credential_pedigree_gatekeeping":{ "$ref": "#/$defs/scored_point" },
+          "growth_mentorship_culture":      { "$ref": "#/$defs/scored_point" },
+          "public_values_alignment":        { "$ref": "#/$defs/scored_point" }
+        },
+        "required": [
+          "location_fit", "career_path_flexibility", "culture_inclusion_signal",
+          "jurisdiction_regulatory_risk", "engineering_culture_alignment",
+          "compliance_credential_requirement", "hiring_health", "inclusive_hiring_practice",
+          "interview_methodology", "skill_stack_transferability", "historical_outcome",
+          "credential_pedigree_gatekeeping", "growth_mentorship_culture", "public_values_alignment"
+        ]
+      }
+    },
+    "required": ["company", "checked_on", "synopsis", "links", "scoring"],
+    "$defs": {
+      "scored_point": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "reason": { "type": "string" }
+        },
+        "required": ["value", "reason"]
+      }
+    }
+  }
+}

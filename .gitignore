@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+company-vetting-prompt.md
+company-vetting-tool-schema.json
+vetted_companies.jsonl
+company_vetting_tool_schema.json
+company_vetting_prompt.md
