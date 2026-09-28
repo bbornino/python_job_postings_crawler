@@ -11,22 +11,24 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+from datetime import timedelta
+import environ
+
+env = environ.Env()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+environ.Env.read_env(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-7vdylci)y(k9@0p=1^tvqrf*&9tq_b(hzfuofsg3o5u)ze0p=q'
+SECRET_KEY = env("SECRET_KEY", default="insecure_key")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
-
+DEBUG = env.bool("DEBUG", default=True)
 
 # Application definition
 
@@ -37,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'crawler',
 ]
 
 MIDDLEWARE = [
@@ -50,6 +53,17 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'config.urls'
+
+# CORS configuration
+ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
+CORS_ALLOW_ALL_ORIGINS = env.bool('CORS_ALLOW_ALL_ORIGINS', default=True)
+CORS_ALLOW_CREDENTIALS = env.bool('CORS_ALLOW_CREDENTIALS', default=True)
+CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[])
+CORS_ALLOW_HEADERS = [
+  'authorization',
+  'content-type',
+  'x-refresh-token', 
+]
 
 TEMPLATES = [
     {
@@ -74,8 +88,17 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        "ENGINE": env("DB_ENGINE", default="django.db.backends.mysql"),  
+                # Use MySQL engine for MariaDB compatibility
+        'NAME': env('DB_NAME', default='auth_users'),
+        'USER': env('DB_USER', default='root'),      # For Localhost
+        'PASSWORD': env('DB_PASSWORD', default=''),  # For Localhost
+        'HOST': env('DB_HOST', default='localhost'), 
+        'PORT': env('DB_PORT', default='3306'),
+        'OPTIONS': {
+            'charset': 'utf8mb4',  # Set charset to utf8mb4 for better Unicode support
+            'collation': 'utf8mb4_unicode_ci',  # Ensure the collation is utf8mb4-based
+        },
     }
 }
 
@@ -104,7 +127,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'America/Los_Angeles'
 
 USE_I18N = True
 
@@ -116,6 +139,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Default primary key field type
+# https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
