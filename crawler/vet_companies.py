@@ -1,11 +1,16 @@
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from analyze_company import analyze_company
+from crawler.analyze_company import analyze_company
 
 
 # Folder this file lives in
 VETTED_COMPANIES = Path(__file__).parent / "vetted_companies.jsonl"
+
+def vet(name: str) -> dict:
+    """Runs in a worker thread. Prints on actual start (not on submit), so only running jobs show."""
+    print(f"Started {name}...")
+    return analyze_company(name)
 
 vetted = {}
 if VETTED_COMPANIES.exists():
@@ -18,11 +23,11 @@ if VETTED_COMPANIES.exists():
                 "board_token": record["board_token"], "vetted_on": record["checked_on"]
             }
 
-companies = ["Anthropic", "Stripe", "Figma"]
+companies = ["Anthropic", "Stripe", "Figma", "Affirm", "AirBnB"]
 to_vet = [c for c in companies if c not in vetted]
 
 with ThreadPoolExecutor(max_workers=4) as pool:
-    futures = { pool.submit(analyze_company, name): name for name in to_vet}
+    futures = { pool.submit(vet, name): name for name in to_vet}
     for future in as_completed(futures):
         name = futures[future]
         try:

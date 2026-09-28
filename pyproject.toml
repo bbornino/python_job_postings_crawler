@@ -1,0 +1,26 @@
+[project]
+name = "python-job-postings-crawler"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Brian Bornino", email = "brianbornino@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.8",
+    "django>=6.1.1",
+    "django-environ>=0.14.0",
+    "mysqlclient>=2.3.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+python-job-postings-crawler = "python_job_postings_crawler:main"
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = false

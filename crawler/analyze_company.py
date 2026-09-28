@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 
 import anthropic
-from prompt_loader import load_prompt, load_tool
+from crawler.prompt_loader import load_prompt, load_tool
 logger = logging.getLogger(__name__)
 
 # os.getenv doesn't read .env on its own; this loads it into the environment first.
@@ -71,7 +71,7 @@ def analyze_company(company_name: str) -> dict:
     )
 
     elapsed = time.perf_counter() - start
-    print(f"Run Time: {elapsed:.1f}s")
+    print(f"{company_name} Run Time: {elapsed:.1f}s")
     logger.info(
                 "Tokens — input: %d, output: %d, cache_read: %d, cache_write: %d",
                 response.usage.input_tokens,
@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
     # Windows console defaults to cp1252, which can't print characters like →.
     sys.stdout.reconfigure(encoding="utf-8")
-    
+
     # sys.argv[0] is the script name; argv[1] is the first word typed after it.
     result = analyze_company(sys.argv[1] if len(sys.argv) > 1 else "Anthropic")
     print(result)
