@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 
 import anthropic
-from crawler.prompt_loader import load_prompt, load_tool
+from crawler.prompts.prompt_loader import load_prompt, load_tool
 logger = logging.getLogger(__name__)
 
 # os.getenv doesn't read .env on its own; this loads it into the environment first.
@@ -32,7 +32,8 @@ def _print_usage(usage: anthropic.types.Usage) -> None:
         f"cache read:  {usage.cache_read_input_tokens or 0}\n"
         f"cache write: {usage.cache_creation_input_tokens or 0}\n"
         # server_tool_use is None when Claude didn't search at all.
-        f"tool use:    {usage.server_tool_use.web_search_requests if usage.server_tool_use else 0}\n"
+        f"tool use:    {usage.server_tool_use.web_search_requests
+                        if usage.server_tool_use else 0}\n"
     )
 
 def analyze_company(company_name: str) -> dict:
@@ -84,7 +85,8 @@ def analyze_company(company_name: str) -> dict:
     # Response mixes text, search, and tool blocks; find the form submission wherever it is.
     block= next((b for b in response.content if b.type == "tool_use"), None)
     if block is None:
-        raise ValueError(f"No vetting submitted for {company_name} (stop_reason: {response.stop_reason})")
+        raise ValueError(
+            f"No vetting submitted for {company_name} (stop_reason: {response.stop_reason})")
     return block.input
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from django.conf import settings
 from crawler.analyze_company import analyze_company
-from crawler.models import Company
+from crawler.models.companies import Company
 
 
 def vet(name: str) -> dict:
