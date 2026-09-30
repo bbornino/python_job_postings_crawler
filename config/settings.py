@@ -52,6 +52,17 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# config/settings.py
+# Concurrent Claude calls when vetting.
+# Raise carefully: each worker is a live API call with web search.
+VETTING_MAX_WORKERS = env.int("VETTING_MAX_WORKERS", default=4)
+
+# Max companies vetted per run (keeps a run inside the Lambda time limit)
+VETTING_MAX_COMPANIES = env.int("VETTING_MAX_COMPANIES", default=10)
+
+# Minimum days before an already-vetted company can be re-vetted
+VETTING_REVET_AFTER_DAYS = env.int("VETTING_REVET_AFTER_DAYS", default=90)
+
 ROOT_URLCONF = 'config.urls'
 
 # CORS configuration
