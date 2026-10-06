@@ -1,25 +1,37 @@
+# vet_companies.py
 """Vet a list of company names with Claude and save each result to the Company table.
 
 Scope: given names -> vet -> save. Deciding WHICH names to vet (input, merge,
 throttle) is vet_new_companies' job. Must be called through manage.py, since
 importing crawler.models requires Django to be set up.
 """
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from django.conf import settings
+from django.db import connections
 from crawler.analyze_company import analyze_company
 from crawler.models.companies import Company
+
+logger = logging.getLogger(__name__)
 
 
 def vet(name: str) -> dict:
     """Vet one company. Runs in a worker thread.
 
-    Prints on actual start (not on submit), so only running jobs show.
-    No DB access here: Django gives each thread its own connection, so all
-    writes stay on the main thread in vet_companies.
+    Logs on actual start (not on submit), so only running jobs show.
+    No Company writes here; those stay on the main thread in vet_companies.
+    The one DB write that does happen in this thread is the audit row saved
+    inside run_with_pause. Django gives each thread its own connection for
+    that, so it's closed on the way out rather than left open.
     """
-    print(f"Started {name}...")
-    return analyze_company(name)
+    # DEBUG, not INFO: run_with_pause already logs "Vetting <name>: starting" at INFO.
+    logger.debug("Worker picked up %s", name)
+    try:
+        return analyze_company(name)
+    finally:
+        connections.close_all()
 
 def vetting_fields(result: dict[str, Any]) -> dict[str, Any]:
     """Map an analyze_company result to Company column values.
@@ -63,11 +75,11 @@ def vet_companies(
         (saved, failed): company names in each outcome.
     """
     if not companies:
-        print("No Companies submitted")
+        logger.info("No companies submitted; nothing to vet.")
         return [], []
 
     saved, failed = [], []
-    
+
     # Reject incomplete input up front, before spending an API call on it.
     to_vet = []
     for company in companies:
@@ -75,14 +87,23 @@ def vet_companies(
             to_vet.append(company)
         else:
             failed.append(company["name"])
-            print(f"FAILED {company['name']}: missing ats or board_token")
+            logger.info("Skipping %s: missing ats or board_token", company['name'])
 
-    print("Companies to vet: " + ", ".join(c["name"] for c in to_vet))
-    
-    with ThreadPoolExecutor(max_workers=max_workers or settings.VETTING_MAX_WORKERS) as pool:
+    if not to_vet:
+        logger.info("All %d submitted companies were incomplete; nothing to vet.",
+                    len(companies))
+        return saved, failed
+
+    workers = max_workers or settings.VETTING_MAX_WORKERS
+    logger.info("Vetting %d companies with %d workers: %s",
+                len(to_vet), workers, ", ".join(c["name"] for c in to_vet))
+    batch_start = time.perf_counter()
+
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = { pool.submit(vet, company["name"]): company for company in to_vet}
         # as_completed yields on the main thread, so every DB write below happens there.
-        for future in as_completed(futures):
+        for done, future in enumerate(as_completed(futures), start=1):
             company = futures[future]
             try:
                 fields = vetting_fields(future.result())
@@ -91,14 +112,23 @@ def vet_companies(
 
                 # INSERT if no row has this name, else UPDATE it (a re-vet).
                 # Name match is case-insensitive via collation.
-                Company.objects.update_or_create(name=company["name"], defaults=fields)
+                _, created = Company.objects.update_or_create(name=company["name"], defaults=fields)
                 saved.append(company["name"])
-                print(f"Saved {company['name']}")
+                logger.info("Saved %s (%s) [%d/%d]", company["name"],
+                            "new" if created else "re-vet", done, len(to_vet))
+
 
             # Broad on purpose: one company failing for any reason must not kill the batch.
-            except Exception as e:  # pylint: disable=broad-exception-caught
+            except Exception:  # pylint: disable=broad-exception-caught
                 failed.append(company["name"])
-                print(f"FAILED {company['name']}: {e}")
+                # logger.exception includes the traceback, so the cause is in the log file.
+                logger.exception("FAILED %s [%d/%d]", company["name"], done, len(to_vet))
+
                 continue
+
+    logger.info("Vetting batch done in %.1fs: %d saved, %d failed",
+                time.perf_counter() - batch_start, len(saved), len(failed))
+    if failed:
+        logger.warning("Failed Companies: %s", ", ".join(failed))
 
     return saved, failed

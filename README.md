@@ -2,7 +2,7 @@
 
 A Claude-powered pipeline that researches companies and scores how well each one fits a configurable set of job-search criteria. It is the first stage of a larger crawler: vet companies first, then pull and analyze job postings only from the companies worth pursuing.
 
-Each company gets one Claude API call. Claude searches the web for current information, then submits its findings through a structured tool call, so every result comes back in the same shape with a short, cited reason behind each score.
+Each company gets one vetting request. Claude searches the web for current information, then submits its findings through a structured tool call, so every result comes back in the same shape with a short, cited reason behind each score.
 
 The project is a headless Django app: no web server or views, just Django's ORM, migrations, admin, and management commands. Results live in MariaDB. The `crawler` app is self-contained so it can later be dropped into the Job App Tracker project, which will provide the GUI for the data generated here.
 
@@ -16,42 +16,88 @@ The input is a CSV of companies with their ATS (applicant tracking system) and j
 4. For each company, Claude runs a few web searches (capped per company), then calls the `submit_company_vetting` tool. The tool's input is the vetting record.
 5. Each record is saved to the `Company` table the moment it finishes (insert for a new company, update for a re-vet), so a crash partway through a batch loses nothing that already completed. A failed company writes nothing and is picked up again on the next run.
 
+Every Claude request, for vetting or for reference collection, goes through one shared function, `run_with_pause` in `claude_api.py`. It streams the response, resumes if the API pauses a long search turn, retries once if the connection drops, times the call, and records its token usage.
+
 A few design choices worth calling out:
 
 - **Structured output through tool use.** The response is constrained to a JSON schema rather than asking the model to "please return JSON."
-- **Server-side web search.** Anthropic runs the searches inside the same API call, so there is no agent loop to manage in this code. Scores are based on current information, not the model's training data.
+- **Server-side web search.** Anthropic runs the searches inside the API call, so this code has no agent loop of its own. The only loop is a resume: when the API pauses a long turn (`pause_turn`), `run_with_pause` sends the conversation back to continue it. Scores are based on current information, not the model's training data.
 - **Prompt caching.** The vetting prompt is identical on every call, so it is cached, which cuts cost and latency across a batch.
 - **Prompts live in Markdown.** Prompts are loaded from `.md` files at runtime instead of being embedded as Python strings, so they stay readable and diff cleanly.
 - **The model returns values, not totals.** Claude scores each criterion individually. Weights and the overall fit score belong in code, not in the model's arithmetic (weighted scoring is planned).
 - **The CSV's board info is authoritative.** The ATS and board token come from Cowork's input, not from Claude, and always overwrite whatever Claude reports.
 - **The database enforces dedupe.** Company names are unique and case-insensitive (via the `utf8mb4_unicode_ci` collation), and each `(ats, board_token)` pair belongs to one company.
-- **All DB writes happen on the main thread.** Worker threads only call Claude; Django gives each thread its own connection, so saves stay in one place.
+- **Company writes happen on the main thread.** Worker threads call Claude and return the result; the main thread saves it. The one exception is the usage audit row, which each worker writes on its own connection and then closes.
+- **Every API call is audited.** Token counts, search counts, duration, and stop reason are saved per call, so cost can be totalled from the database instead of reconstructed from logs.
 - **Small, single-purpose commands.** Each pipeline step is its own management command, so steps can run independently locally and later as separate AWS Lambda invocations.
 
 ### Current limitations
 
 The vetting prompt is written for the finished pipeline, but for now Claude receives only the company name. Three inputs aren't wired up yet, and the prompt says so explicitly:
 
-- **Reference lists** (HRC CEI, Newsweek, AARP, state legal-risk tiers), planned as a monthly refresh. Until then, the scoring points that use them fall back to other research or neutral defaults.
+- **Reference lists** (HRC CEI, Newsweek, AARP, state legal-risk tiers), planned as a monthly refresh. Collection runs for inclusion references and EEOC age actions exist in `update_references.py`, with tables to hold them, but vetting doesn't read them yet. Until then, the scoring points that use them fall back to other research or neutral defaults.
 - **Job postings**, which arrive once `crawl_boards` exists. Posting-style signals are judged from company pages, review sites, and news instead.
 - **Prior rejections**, to be filled from the database by code. Claude outputs a placeholder.
+
+Two more, on the operational side:
+
+- **Company names on the command line always fail vetting.** They carry no ATS or board token, which vetting requires. Use `--csv`.
+- **Failed API calls aren't in the audit table.** Only calls that return usage are recorded. Failures appear in the log file.
+
+## Logging and auditing
+
+Output goes to three places, each with a different lifetime.
+
+| Where | What | Kept for |
+|---|---|---|
+| Console | Log lines, plus a live status line showing each running call and its elapsed time | The run |
+| `logs/django.log` | The same log lines with timestamps, rotated at midnight | 30 days |
+| `LLMCallAudit` table | One row per Claude API call: purpose, model, token counts, web searches, duration, stop reason | Until deleted |
+
+A one-company run looks like this:
+
+```text
+INFO vet_new_companies starting: source=company_ats_boards.csv max_companies=1 revet_after_days=90 workers=4
+INFO Read company_ats_boards.csv: 622 crawlable rows; skipped 0 blank name, 501 no board token, 3 ignored ATS
+INFO Selection: 622 input, 10 recently vetted (since 2026-07-08), 612 eligible, 1 this run, 611 deferred to a later run
+INFO Vetting 1 companies with 4 workers: AcuityMD
+INFO Vetting AcuityMD: starting (model=claude-haiku-4-5)
+Running: Vetting AcuityMD 12s
+INFO Vetting AcuityMD: usage 24.0s stop_reason=tool_use input=346 output=1955 cache_read=37194 cache_write=34648 searches=4 fetches=0
+INFO Vetting AcuityMD: finished in 24.0s
+INFO AcuityMD: vetting form received (11 fields)
+INFO Saved AcuityMD (new) [1/1]
+INFO Vetting batch done in 24.0s: 1 saved, 0 failed
+```
+
+The `Running:` line redraws once a second and never reaches the log file. With several workers, all running calls share that one line. When output isn't a terminal (Lambda, or redirected to a file), it becomes a plain log line every 30 seconds instead.
+
+`stop_reason=tool_use` is the good ending: Claude submitted the form. `max_tokens` means the record was cut off and the cap for that request type needs raising.
+
+The audit table stores token counts rather than dollar cost, because pricing changes. Each row's `purpose` is a category such as `vet_company`, so usage can be totalled per purpose and date range in Django admin or SQL. A request that pauses and resumes makes several API calls and so produces several rows.
 
 ## Project layout
 
 | Path | Purpose |
 |---|---|
 | `manage.py` | Django entry point |
-| `config/` | Django project settings; reads configuration from `.env` |
+| `config/` | Django project settings; reads configuration from `.env`, defines logging |
 | `crawler/` | The Django app holding all crawler logic |
-| `crawler/models.py` | `Company` (vetting results) and `CrawledPosting` (job postings, for the next stage) |
+| `crawler/models/` | Model package. `companies.py`: `Company` (vetting results). `audit.py`: `LLMCallAudit` (one row per Claude API call). Also `CrawledPosting` (job postings, for the next stage) and the reference-data models |
 | `crawler/admin.py` | Django admin views: the interim GUI for browsing results |
 | `crawler/management/commands/vet_new_companies.py` | Command: reads the input, skips recent and ineligible companies, throttles, hands off to `vet_companies` |
 | `crawler/vet_companies.py` | Vets a list of companies in parallel and saves each result to the DB |
-| `crawler/analyze_company.py` | Vets a single company; can also be run on its own as a test bench |
-| `crawler/prompt_loader.py` | Loads prompt (`.md`) and tool schema (`.json`) files from the `crawler/` folder |
+| `crawler/analyze_company.py` | Vets a single company: builds the request and pulls the vetting record out of the response |
+| `crawler/claude_api.py` | Anthropic client, model and token-cap settings, and `run_with_pause`, the shared request function |
+| `crawler/audit.py` | `record_usage`: logs one API call's usage and writes its `LLMCallAudit` row |
+| `crawler/utils.py` | Live status line and its console log handler; saving and reloading raw API responses |
+| `crawler/update_references.py` | Collection runs for the reference data vetting will look up |
+| `crawler/prompts/prompt_loader.py` | Loads prompt (`.md`) and tool schema (`.json`) files |
 | `crawler/greenhouse.py` | Greenhouse job board API helpers for the job-posting stage |
 | `crawler/company_vetting_prompt.example.md` | Genericized sample of the vetting prompt, showing its structure and scoring pattern |
 | `crawler/company_vetting_tool_schema.example.json` | Genericized sample of the tool schema that defines each vetting record |
+| `logs/` | Rotating log files (gitignored) |
+| `runs/` | Raw API responses saved by reference collection runs (gitignored) |
 | `pyproject.toml` / `uv.lock` | Dependencies, managed with [uv](https://docs.astral.sh/uv/) |
 | `.env.example` | Template for the environment variables the project reads |
 
@@ -61,7 +107,7 @@ The real configuration holds personal job-search criteria, so it stays out of ve
 
 | File | What it holds |
 |---|---|
-| `.env` | API key, Django secret key, database settings, vetting throttles |
+| `.env` | API key, Django secret key, database settings, vetting throttles, token caps, log level |
 | `crawler/company_vetting_prompt.md` | The real vetting prompt, with personal criteria and weights |
 | `crawler/company_vetting_tool_schema.json` | The real tool schema; its field names mirror the private criteria |
 | `company_ats_boards.csv` | The personal company list from Claude Cowork: `Company Name`, `ATS Name`, `ATS board name` |
@@ -92,7 +138,9 @@ Fill in `.env`: your Anthropic API key, a Django `SECRET_KEY`, and the `DB_*` se
 python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
 ```
 
-The vetting throttles are optional (defaults shown):
+The remaining settings are optional (defaults shown).
+
+Vetting throttles:
 
 ```dotenv
 # Max concurrent Claude vetting calls
@@ -101,6 +149,25 @@ VETTING_MAX_WORKERS=4
 VETTING_MAX_COMPANIES=10
 # Minimum days before an already-vetted company can be re-vetted
 VETTING_REVET_AFTER_DAYS=90
+```
+
+Claude models and limits:
+
+```dotenv
+DEFAULT_MODEL=claude-sonnet-4-6
+# max_tokens per request type. Raise one if its runs log a max_tokens warning.
+VETTING_MAX_TOKENS=4096
+INCLUSION_REFS_MAX_TOKENS=8000
+EEOC_AGE_ACTIONS_MAX_TOKENS=32000
+# Times to retry one API call when the connection drops mid-response. 0 = off.
+# A retry starts that call over, so Claude repeats its web searches.
+CLAUDE_CONNECTION_RETRIES=1
+```
+
+Logging:
+
+```dotenv
+LOG_LEVEL=INFO
 ```
 
 Create the database, run migrations, and create an admin login:
@@ -133,14 +200,7 @@ python manage.py vet_new_companies --csv company_ats_boards.csv --max-companies 
 python manage.py vet_new_companies --help
 ```
 
-Vet a single company without touching the database (useful for prompt tuning):
-
-```bash
-python -m crawler.analyze_company Figma
-python -m crawler.analyze_company "Scale AI"
-```
-
-Browse results in Django admin:
+Browse results and API usage in Django admin:
 
 ```bash
 python manage.py runserver
@@ -150,7 +210,11 @@ Then open `http://localhost:8000/admin`.
 
 ## Cost and performance
 
-A typical company takes about 50–60 seconds and a few web searches. Most input tokens are search results, which are cached within each call. Running 4 companies in parallel keeps a batch at roughly one minute per four companies while staying well under API rate limits.
+On `claude-haiku-4-5`, recent single-company runs took 24 to 33 seconds and 4 to 6 web searches each. Token use per company was roughly 350 uncached input, 2,000 to 2,600 output, 35,000 to 45,000 cache-write, and 37,000 to 73,000 cache-read. Almost all of the input is search results, which are cached within the call. A larger model will be slower and cost more per company.
+
+Running 4 companies in parallel keeps a batch at roughly one company's duration per four companies while staying well under API rate limits.
+
+Exact figures for any run are in the `LLMCallAudit` table.
 
 ## Roadmap
 
@@ -160,7 +224,10 @@ A typical company takes about 50–60 seconds and a few web searches. Most input
   - `export_companies`: regenerate the CSV for Cowork, including the "already vetted" list
   - `crawl_boards`: pull postings from Greenhouse (and other ATS boards) for vetted companies
   - `email_digest`: email ranked, not-yet-sent postings
+- A single-company test command for prompt tuning that skips the `Company` save
+- Record failed API calls in the audit table, and group rows by run
 - Verify board tokens against the ATS APIs in code, to catch bad tokens from Cowork
 - A `--time-budget` throttle so a run fits inside a Lambda invocation
+- Send logs to CloudWatch instead of a local file when running on Lambda
 - Plug the `crawler` app into the Job App Tracker project, which provides the GUI; crawled postings get "promoted" into tracked applications
 - Run nightly on AWS (EventBridge Scheduler triggering Lambda, container image deployment)

@@ -11,7 +11,6 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
-from datetime import timedelta
 import environ
 
 env = environ.Env()
@@ -161,5 +160,84 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+    },
+}
+
+# ==============================
+# LOGGING CONFIGURATION
+# ==============================
+# Django logging setup that reads LOG_LEVEL from .env.
+# Logs are stored in logs/django.log (ensure the 'logs/' directory exists).
+# Adjust log level per environment: DEBUG (dev), INFO (staging), WARNING (prod).
+LOG_LEVEL = env("LOG_LEVEL", default="INFO") # Default to WARNING if not set
+APP_LOG_LEVEL = env("APP_LOG_LEVEL", default="DEBUG")  # your code
+SQL_LOG_LEVEL = env("SQL_LOG_LEVEL", default="INFO")   # DEBUG = every query
+
+# Define log directory
+LOG_DIR = Path(env("LOG_DIR", default=BASE_DIR / "logs"))
+LOG_DIR.mkdir(exist_ok=True)  # the logging handlers won't create it themselves
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {name}:{lineno} {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "file": {
+            "level": LOG_LEVEL,
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "filename": str(LOG_DIR / "django.log"), 
+            "when": "midnight",  # Rotate logs at midnight
+            "interval": 1,  # Rotate every 1 day
+            'backupCount': 30,  # Keep the last 30 days of logs
+            'formatter': 'verbose',
+            'delay': True,
+            "encoding": "utf-8",
+
+            # When the RotatingFileHandler is used without the delay option, it opens the log file
+            # as soon as the logging configuration is loaded, even before any logging takes place.
+            # This can result in the file being locked for the entire process, preventing log
+            # rotation (or renaming of the log file) because the file is still being held open by
+            # the logging handler.
+
+            # By setting delay: True, the RotatingFileHandler delays the opening of the log file
+            # until the first log message is written. This means the file is not immediately locked
+            # by the handler when the application starts, and it allows log rotation to proceed
+            # without any issues. Essentially, it avoids any conflicts between the log rotation
+            # process and any other process or thread that may want to access the log file
+            # (like Django’s development server, which could be holding the file open).
+
+        },
+        "console": {
+            "level": LOG_LEVEL,
+            "class": "crawler.utils.TickerConsoleHandler",
+            "formatter": "simple",
+        },
+    },
+        "loggers": {
+            "crawler": {"level": APP_LOG_LEVEL},   # your app package name
+        # Log database queries
+        "django.db.backends": {
+            "level": SQL_LOG_LEVEL,  # You can adjust this to INFO or ERROR as needed
+            "handlers": ["file", "console"],  # Log to both file and console
+            "propagate": False,  # Prevent it from propagating to the root logger
+        },
+        "httpx": {"level": "WARNING"},
+        "httpx2": {"level": "WARNING"},
+        "httpcore": {"level": "WARNING"},
+        "anthropic": {"level": "WARNING"},
+        "urllib3": {"level": "WARNING"},
+    },
+    "root": {
+        "handlers": ["file", "console"],
+        "level": LOG_LEVEL,
     },
 }

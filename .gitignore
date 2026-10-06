@@ -219,5 +219,11 @@ __marimo__/
 company-vetting-prompt.md
 company-vetting-tool-schema.json
 vetted_companies.jsonl
-company_vetting_tool_schema.json
-company_vetting_prompt.md
+
+crawler/prompts/eeoc_age_actions_prompt.md
+crawler/prompts/company_vetting_prompt.md
+crawler/prompts/company_vetting_tool_schema.json
+crawler/prompts/eeoc_age_actions_tool_schema.json
+crawler/prompts/inclusion_references_prompt.md
+crawler/prompts/inclusion_references_tool_schema.json
+logs/*

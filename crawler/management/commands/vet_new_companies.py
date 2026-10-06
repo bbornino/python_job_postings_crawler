@@ -3,20 +3,24 @@ collect new companies, merge with the DB, vet a throttled batch.
 
 Common commands:
 python manage.py vet_new_companies
-python manage.py vet_new_companies --limit 3
+python manage.py vet_new_companies --csv companies.csv
+python manage.py vet_new_companies --csv companies.csv --max-companies 1
 python manage.py vet_new_companies --help
 
 Caveat: command-line names currently always fail vetting, since they carry no
 ats/board_token and vet_companies rejects companies missing either. Use --csv.
 """
 import csv
+import logging
 from pathlib import Path
 from datetime import timedelta
 from django.utils import timezone
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
 from crawler.vet_companies import vet_companies
-from crawler.models import Company
+from crawler.models.companies import Company
+
+logger = logging.getLogger(__name__)
 
 # Job boards/aggregators or unknowns: no crawlable company board, so don't vet.
 IGNORED_ATS = {"linkedin", "indeed", "unknown", "dice", "phenom", "custom / in house"}
@@ -45,19 +49,32 @@ def read_csv(csv_path: Path) -> list[dict]:
         if missing:
             raise CommandError(f"{csv_path} is missing columns: {', '.join(missing)}")
         rows = []
+        blank_names = no_board = ignored_ats = 0
         for row in reader:
             name = row["Company Name"].strip()
             if not name:
+                blank_names += 1
                 continue
             ats = row["ATS Name"].strip()
             board_token = row["ATS board name"].strip()
 
             # A blank board also covers blank-ATS rows; neither can be crawled.
-            if not board_token or ats.casefold() in IGNORED_ATS:
+            if not board_token:
+                no_board += 1
+                logger.debug("CSV skip %s: no board token", name)
+                continue
+            if ats.casefold() in IGNORED_ATS:
+                ignored_ats += 1
+                logger.debug("CSV skip %s: ignored ATS '%s'", name, ats)
                 continue
             rows.append({
                 "name": name, "ats": ats, "board_token": board_token
             })
+
+        logger.info(
+            "Read %s: %d crawlable rows; skipped %d blank name, %d no board token, %d ignored ATS",
+            csv_path, len(rows), blank_names, no_board, ignored_ats
+        )
         return rows
 
 class Command(BaseCommand):
@@ -68,7 +85,8 @@ class Command(BaseCommand):
     help = "Collect new companies, merge with the DB, and vet a throttled batch."
 
     def add_arguments(self, parser):
-        """Define CLI flags. Throttle defaults come from settings (.env), so flags override per run."""
+        """Define CLI flags. Throttle defaults come from settings (.env),
+            so flags override per run."""
         # Either names or --csv, not both; enforced in handle(). Not an argparse
         # mutually exclusive group: nargs="*" positionals misbehave inside one.
         parser.add_argument(
@@ -97,16 +115,23 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         """Build the input list, drop recently vetted companies, cap the batch, and vet it."""
         names, csv_path = options["names"], options["csv"]
-        
+        logger.info(
+            "vet_new_companies starting: source=%s max_companies=%d revet_after_days=%d workers=%d",
+            csv_path or "command line", options["max_companies"],
+            options["revet_after_days"], options["workers"]
+        )
+
         if names and csv_path:
-            raise CommandError("Use either company n ames or --csv, not both.")
+            raise CommandError("Use either company names or --csv, not both.")
         if csv_path:
             company_list = read_csv(csv_path)
         elif names:
             # No board info from the command line; see the module docstring caveat.
             company_list = [{"name": n.strip(), "ats": None, "board_token": None} for n in names]
+            logger.warning("Names given on the command line have no ats/board_token "
+                           "and will fail vetting.  Use --csv.")
         else:
-            raise CommandError('Give company  names (e.g. Stripe "Scale AI") or --csv PATH.')
+            raise CommandError('Give company names (e.g. Stripe "Scale AI") or --csv PATH.')
 
         # Vetted after the cutoff = checked fewer than N days ago, so skip for now.
         # Never-vetted companies aren't in this set, so they land in to_process automatically.
@@ -119,18 +144,20 @@ class Command(BaseCommand):
         # casefold on both sides: this comparison runs in Python, not under the DB's
         # case-insensitive collation, so "AirBnB" must be matched to "Airbnb" by hand.
         to_skip = [n for n in company_list if n["name"].casefold() in recently_vetted]
-        to_process = [n for n in company_list if n["name"].casefold() not in recently_vetted]
+        eligible = [n for n in company_list if n["name"].casefold() not in recently_vetted]
 
         # Throttle: keeps a run inside the Lambda time limit. The rest wait for the next run.
-        to_process = to_process[: options["max_companies"]]
+        to_process = eligible[: options["max_companies"]]
+        deferred = len(eligible) - len(to_process)
 
-        print("Vet New Companies -")
-        print(f"Max Companies to Vet: { options["max_companies"]}")
-        print(f"Re-Vet Companies after Days: { options["revet_after_days"]}")
-        
+        logger.info("Selection: %d input, %d recently vetted (since %s), %d eligible, "
+                    "%d this run, %d deferred to a later run",
+                    len(company_list), len(to_skip), cutoff, len(eligible),
+                    len(to_process), deferred)
+
         if to_skip:
-            print("Skipping these companies: " + ', '.join(c["name"] for c in to_skip))
-        
+            logger.debug("Recently vetted, skipped: %s", ", ".join(c["name"] for c in to_skip))
+
         if to_process:
-            print("Processing these companies: " + ', '.join(c["name"] for c in to_process))
+            logger.debug("Processing these companies: %s", ", ".join(c["name"] for c in to_process))
             vet_companies(to_process, max_workers=options["workers"])

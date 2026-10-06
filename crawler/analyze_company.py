@@ -2,39 +2,11 @@
 """Vet a single company with Claude: web-search it, then return a filled-in scoring form."""
 import logging
 import sys
-import time
-import os
-from dotenv import load_dotenv
 
-
-import anthropic
+from crawler.claude_api import DEFAULT_MODEL, VETTING_MAX_TOKENS, run_with_pause
 from crawler.prompts.prompt_loader import load_prompt, load_tool
+
 logger = logging.getLogger(__name__)
-
-# os.getenv doesn't read .env on its own; this loads it into the environment first.
-load_dotenv()
-_api_key = os.getenv("ANTHROPIC_API_KEY")
-if not _api_key:
-    raise ValueError("ANTHROPIC_API_KEY is not set")
-
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "claude-sonnet-4-6")
-THINKING_MODEL = os.getenv("THINKING_MODEL", "claude-opus-4-7")
-THINKING_BUDGET = int(os.getenv("THINKING_BUDGET", "8000"))
-
-client = anthropic.Anthropic(api_key=_api_key)
-
-def _print_usage(usage: anthropic.types.Usage) -> None:
-    """Print token usage and web search count to stdout."""
-    print(
-        f"\n--- token usage ---\n"
-        f"input:       {usage.input_tokens}\n"
-        f"output:      {usage.output_tokens}\n"
-        f"cache read:  {usage.cache_read_input_tokens or 0}\n"
-        f"cache write: {usage.cache_creation_input_tokens or 0}\n"
-        # server_tool_use is None when Claude didn't search at all.
-        f"tool use:    {usage.server_tool_use.web_search_requests
-                        if usage.server_tool_use else 0}\n"
-    )
 
 def analyze_company(company_name: str) -> dict:
     """Research and score one company.
@@ -51,11 +23,13 @@ def analyze_company(company_name: str) -> dict:
     Raises:
         ValueError: Claude finished without submitting the vetting form.
     """
-    start = time.perf_counter()
+    
 
-    response = client.messages.create(
+    response = run_with_pause(
+        label=f"Vetting {company_name}",
+        purpose="vet_company",
         model=DEFAULT_MODEL,
-        max_tokens=4096,
+        max_tokens=VETTING_MAX_TOKENS,
         # System prompt is identical on every call, so cache it.
         system=[{
             "type": "text",
@@ -71,22 +45,22 @@ def analyze_company(company_name: str) -> dict:
         messages=[{"role": "user", "content": f"Vet: {company_name}"}]
     )
 
-    elapsed = time.perf_counter() - start
-    print(f"{company_name} Run Time: {elapsed:.1f}s")
-    logger.info(
-                "Tokens — input: %d, output: %d, cache_read: %d, cache_write: %d",
-                response.usage.input_tokens,
-                response.usage.output_tokens,
-                response.usage.cache_read_input_tokens or 0,
-                response.usage.cache_creation_input_tokens or 0,
-            )
-    _print_usage(response.usage)
+    # A cut-off response can still contain a form, but it may be incomplete.
+    if response.stop_reason == "max_tokens":
+        logger.warning("%s: output hit max_tokens=%d; vetting record may be cut off.",
+                       company_name, VETTING_MAX_TOKENS)
 
     # Response mixes text, search, and tool blocks; find the form submission wherever it is.
     block= next((b for b in response.content if b.type == "tool_use"), None)
     if block is None:
+        # Already paid for, so log what came back before raising.
+        logger.error("%s: no vetting form submitted (stop_reason=%s, block types=%s)",
+                     company_name, response.stop_reason, [b.type for b in response.content])
         raise ValueError(
             f"No vetting submitted for {company_name} (stop_reason: {response.stop_reason})")
+    
+    logger.info("%s: vetting form received (%d fields)", company_name, len(block.input))
+    logger.debug("%s: vetting record: %s", company_name, block.input)
     return block.input
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ class Company(models.Model):
         ]
 
     def __str__(self):
-        return self.name
+        return str(self.name)
 
 
 class CrawledPosting(models.Model):
@@ -86,7 +86,8 @@ class CrawledPosting(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["company", "external_id"], name="unique_posting_per_company"),
+            models.UniqueConstraint(fields=["company", "external_id"],
+                                    name="unique_posting_per_company"),
         ]
         indexes = [
             models.Index(fields=["fit_score"]),
