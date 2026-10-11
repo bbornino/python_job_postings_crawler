@@ -112,6 +112,15 @@ DATABASES = {
     }
 }
 
+# Hide Django's mysql.W003 warning, which prints on every manage.py command:
+#   "MariaDB may not allow unique CharFields to have a max_length > 255."
+# It is about EeocAction.url (unique, max_length=500). The warning exists for
+# old MySQL/MariaDB setups that cap a unique index at 767 bytes. Ours allows
+# 3,072, and the table was created and filled with that index, so it is a
+# false alarm here.
+# Side effect: this hides the warning for EVERY model. Before adding another
+# unique text field longer than 255, remove this line and re-check.
+SILENCED_SYSTEM_CHECKS = ["mysql.W003"]
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
@@ -235,6 +244,7 @@ LOGGING = {
         "httpcore": {"level": "WARNING"},
         "anthropic": {"level": "WARNING"},
         "urllib3": {"level": "WARNING"},
+        "pygls": {"level": "ERROR"},
     },
     "root": {
         "handlers": ["file", "console"],
