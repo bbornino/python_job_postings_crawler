@@ -35,7 +35,8 @@ A few design choices worth calling out:
 
 The vetting prompt is written for the finished pipeline, but for now Claude receives only the company name. Three inputs aren't wired up yet, and the prompt says so explicitly:
 
-- **Reference lists** (HRC CEI, Newsweek, AARP, state legal-risk tiers), planned as a monthly refresh. Collection runs for inclusion references and EEOC age actions exist in `update_references.py`, with tables to hold them, but vetting doesn't read them yet. Until then, the scoring points that use them fall back to other research or neutral defaults.
+- **Reference lists** (Newsweek, AARP, state legal-risk tiers), planned as a monthly refresh. Collection runs for inclusion references and EEOC age actions exist in `update_references.py`, with tables to hold them, but vetting doesn't read them yet. Until then, the scoring points that use them fall back to other research or neutral defaults.
+- **HRC Corporate Equality Index scores.** The lookup works (see [HRC lookup](#hrc-lookup)), but vetting doesn't call it and results aren't saved yet.
 - **Job postings**, which arrive once `crawl_boards` exists. Posting-style signals are judged from company pages, review sites, and news instead.
 - **Prior rejections**, to be filled from the database by code. Claude outputs a placeholder.
 
@@ -43,6 +44,59 @@ Two more, on the operational side:
 
 - **Company names on the command line always fail vetting.** They carry no ATS or board token, which vetting requires. Use `--csv`.
 - **Failed API calls aren't in the audit table.** Only calls that return usage are recorded. Failures appear in the log file.
+
+## HRC lookup
+
+`crawler/hrc_lookup.py` looks up one company's rating on the Human Rights Campaign's [Corporate Equality Index](https://www.hrc.org/resources/employers) (CEI), a yearly score of LGBTQ-inclusive workplace policies. It's a plain scraper: no Claude call, no tokens, and the same answer every time.
+
+### How to read the score
+
+Most rated companies score 100, including nearly every large tech company, so a high score says very little. **Only a low score is a signal**, and even then it's a low-weight red flag, not a scoring input. Treat "not rated" the same as a high score: no signal either way. Coverage is mostly Fortune 500 companies and large law firms, so most startups come back not rated.
+
+Two fields add a little nuance:
+
+- `verified` is `False` when the company didn't submit that year's CEI survey and HRC carried a score forward. An unverified 100 is a weaker 100.
+- `criteria` breaks the score into HRC's five sections, so a middling total can be traced to, for example, partial benefits points.
+
+### Lookup only, on demand
+
+The index has about 4,300 employers, so it is deliberately **not** bulk-crawled. A company is looked up only when the pipeline actually meets it, at roughly two to four requests per company. The index changes once a year, so a result can be cached until the next CEI release. That cache belongs to the caller; `hrc_lookup.py` only fetches and parses.
+
+### How a company is matched
+
+1. **Guess the URL.** HRC's company pages live at `/resources/corporations/<slug>`, so the name is slugified and fetched directly. A hit costs one request.
+2. **Search if that 404s.** HRC's search is loose: it matches substrings and brand names, so its first result is often a different company ("HP" returns GlassBridge first, "Stripe" returns Diageo). The lookup reads up to 5 pages of results and accepts a company only if its name actually matches:
+
+| `matched_via` | Meaning | Example |
+|---|---|---|
+| `slug` | The URL guess worked | Abbott Laboratories |
+| `search` | Same name once Inc., Corp., Co. and similar are dropped | HP → HP Inc. |
+| `search_prefix` | Exactly one result starts with the name (weaker) | Cisco → Cisco Systems Inc. |
+| `search_acronym` | Exactly one result's initials spell the name (weaker) | AMD → Advanced Micro Devices Inc. |
+
+If nothing matches, the result is `None`, never a different company. The flip side: a company HRC lists under a different name (GE, Alphabet) also comes back `None`. For a red-flag-only input that's the safe way to fail.
+
+All requests go through `net.fetch` (User-Agent, live status line, per-request logging, 429 back-off), with a 1.5 second pause between requests to hrc.org. hrc.org's `robots.txt` allows `/resources/` for generic crawlers.
+
+A lookup returns a dict like this (criteria trimmed):
+
+```json
+{
+  "name": "Tesla Inc.",
+  "headquarters": "Palo Alto, CA",
+  "industry": "Automotive",
+  "score": 55,
+  "score_year": 2026,
+  "verified": false,
+  "criteria": [
+    {"name": "Inclusive Benefits", "label": "Points", "points": "35/50", "earned": 35, "possible": 50}
+  ],
+  "url": "https://www.hrc.org/resources/corporations/tesla-inc.",
+  "matched_via": "search"
+}
+```
+
+A non-404 error (a 5xx, or a 429 that `net.fetch` gave up on) raises `requests.HTTPError` instead of returning `None`, so a temporary failure is never mistaken for "not rated."
 
 ## Logging and auditing
 
@@ -86,11 +140,15 @@ The audit table stores token counts rather than dollar cost, because pricing cha
 | `crawler/models/` | Model package. `companies.py`: `Company` (vetting results). `audit.py`: `LLMCallAudit` (one row per Claude API call). Also `CrawledPosting` (job postings, for the next stage) and the reference-data models |
 | `crawler/admin.py` | Django admin views: the interim GUI for browsing results |
 | `crawler/management/commands/vet_new_companies.py` | Command: reads the input, skips recent and ineligible companies, throttles, hands off to `vet_companies` |
+| `crawler/management/commands/update_hrc_companies.py` | Command: looks up HRC CEI scores for the companies named on the command line (lookup only, no save yet) |
 | `crawler/vet_companies.py` | Vets a list of companies in parallel and saves each result to the DB |
 | `crawler/analyze_company.py` | Vets a single company: builds the request and pulls the vetting record out of the response |
 | `crawler/claude_api.py` | Anthropic client, model and token-cap settings, and `run_with_pause`, the shared request function |
 | `crawler/audit.py` | `record_usage`: logs one API call's usage and writes its `LLMCallAudit` row |
 | `crawler/utils.py` | Live status line and its console log handler; saving and reloading raw API responses |
+| `crawler/net.py` | `fetch`: the shared HTTP GET for every scraper (User-Agent, status line, logging, 429 retries) |
+| `crawler/hrc_lookup.py` | `get_hrc_score`: looks up one company's HRC Corporate Equality Index rating |
+| `crawler/tests/` | Tests. `test_hrc_lookup.py` runs against saved hrc.org pages in `tests/fixtures/`, with no network access |
 | `crawler/update_references.py` | Collection runs for the reference data vetting will look up |
 | `crawler/prompts/prompt_loader.py` | Loads prompt (`.md`) and tool schema (`.json`) files |
 | `crawler/greenhouse.py` | Greenhouse job board API helpers for the job-posting stage |
@@ -200,6 +258,39 @@ python manage.py vet_new_companies --csv company_ats_boards.csv --max-companies 
 python manage.py vet_new_companies --help
 ```
 
+Look up HRC Corporate Equality Index scores (quote names with spaces):
+
+```bash
+python manage.py update_hrc_companies "Tesla" "Stripe"
+```
+
+```text
+INFO HRC lookup for 2 companies: Tesla, Stripe
+INFO 404 https://www.hrc.org/resources/corporations/tesla (1.6s)
+INFO 200 https://www.hrc.org/resources/employers/search?q=Tesla (2.2s)
+INFO 200 https://www.hrc.org/resources/corporations/tesla-inc. (1.3s)
+Tesla: Tesla Inc., score 55 (unverified, via search)
+INFO 404 https://www.hrc.org/resources/corporations/stripe (1.5s)
+INFO 200 https://www.hrc.org/resources/employers/search?q=Stripe (1.6s)
+Stripe: not rated by HRC
+INFO HRC lookup done in 12.8s: 1 rated, 1 not rated, 0 failed
+INFO Not rated by HRC: Stripe
+```
+
+The 404s are expected: each is a missed URL guess, followed by a search. To see one company's full result as JSON, without Django:
+
+```bash
+python -m crawler.hrc_lookup "Tesla"
+```
+
+Run the HRC tests (no network needed):
+
+```bash
+python manage.py test crawler.tests.test_hrc_lookup
+```
+
+If HRC redesigns its pages, the parser tests fail first. Re-save the fixtures in `crawler/tests/fixtures/` from the live site, then fix `parse_detail_page` to match.
+
 Browse results and API usage in Django admin:
 
 ```bash
@@ -219,6 +310,7 @@ Exact figures for any run are in the `LLMCallAudit` table.
 ## Roadmap
 
 - Wire the missing prompt inputs: a monthly reference-list refresh, prior rejections from the database, and job postings once they're crawled
+- Save HRC results per company (one lookup per CEI year) and feed a low score into vetting as a red flag
 - Compute weighted fit scores in code from each record's values
 - Management commands for the remaining pipeline steps:
   - `export_companies`: regenerate the CSV for Cowork, including the "already vetted" list
